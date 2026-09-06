@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Render output
+output/
+frames/
+*.mp4
+*.gif
