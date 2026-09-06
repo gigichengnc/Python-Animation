@@ -29,3 +29,15 @@ def test_loop_phase_wraps_exactly():
     first = scene.render_frame(0)
     wrapped = scene.render_frame(cfg.frame_count)
     assert first.tobytes() == wrapped.tobytes()
+
+
+def test_world_moves_but_carriage_anchor_stays_stable():
+    cfg = RenderConfig(duration=12, fps=12)
+    scene = PixelTrainScene(cfg)
+    a = scene.render_frame(0)
+    b = scene.render_frame(31)
+
+    assert a.tobytes() != b.tobytes()
+    # Ceiling / structural pixels are anchored to the camera.
+    assert a.getpixel((2, 2)) == b.getpixel((2, 2))
+    assert a.getpixel((64, 110)) == b.getpixel((64, 110))

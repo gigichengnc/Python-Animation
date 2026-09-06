@@ -25,50 +25,59 @@ class RenderConfig:
 
     @property
     def frame_count(self) -> int:
-        return round(self.fps * self.duration)
+        return max(1, round(self.fps * self.duration))
 
 
 class PixelTrainScene:
-    """Original layered pixel-art train scene.
+    """Production-oriented v0.2 pixel train scene.
 
-    Motion is frame-driven and deterministic. The outside world loops using
-    integer cycle counts, while the train interior remains visually anchored.
+    Everything is rendered from code at native pixel resolution.
+    The carriage is anchored while the world outside uses deterministic,
+    looping parallax layers.
     """
 
-    WINDOWS = ((18, 30, 80, 102), (94, 24, 231, 102), (246, 30, 308, 102))
+    MAIN_WINDOW = (69, 25, 251, 108)
+    SIDE_WINDOWS = ((8, 31, 59, 101), (261, 31, 312, 101))
+    ALL_WINDOWS = (MAIN_WINDOW,) + SIDE_WINDOWS
 
     def __init__(self, config: RenderConfig | None = None):
         self.config = config or RenderConfig()
         self.rng = random.Random(self.config.seed)
-        self._stars = self._make_stars(70)
-        self._city = self._make_city(620)
-        self._foreground = self._make_foreground(620)
+        self._stars = self._make_stars(92)
+        self._city_far = self._make_city(840, 7, 17, 10, 32)
+        self._city_near = self._make_city(720, 10, 24, 17, 48)
+        self._foreground = self._make_foreground(760)
 
     def _make_stars(self, count: int):
         return [
-            (self.rng.randrange(8, self.config.width - 8), self.rng.randrange(6, 66), self.rng.choice((1, 1, 1, 2)))
+            (
+                self.rng.randrange(4, self.config.width - 4),
+                self.rng.randrange(5, 74),
+                self.rng.choice((1, 1, 1, 1, 2)),
+            )
             for _ in range(count)
         ]
 
-    def _make_city(self, world_width: int):
-        buildings = []
+    def _make_city(self, world_width: int, min_w: int, max_w: int, min_h: int, max_h: int):
+        out = []
         x = 0
         while x < world_width:
-            w = self.rng.randrange(6, 16)
-            h = self.rng.randrange(11, 43)
-            roof = self.rng.choice(("flat", "antenna", "step"))
-            buildings.append((x, w, h, roof))
-            x += w + self.rng.randrange(2, 7)
-        return buildings
+            bw = self.rng.randrange(min_w, max_w + 1)
+            bh = self.rng.randrange(min_h, max_h + 1)
+            roof = self.rng.choice(("flat", "flat", "antenna", "step"))
+            light_phase = self.rng.randrange(0, 7)
+            out.append((x, bw, bh, roof, light_phase))
+            x += bw + self.rng.randrange(2, 7)
+        return out
 
     def _make_foreground(self, world_width: int):
-        items = []
+        out = []
         x = 0
         while x < world_width:
-            kind = self.rng.choice(("pole", "pole", "pole", "lamp", "signal"))
-            items.append((x, kind))
-            x += self.rng.randrange(24, 52)
-        return items
+            kind = self.rng.choice(("pole", "pole", "pole", "lamp", "signal", "gantry"))
+            out.append((x, kind))
+            x += self.rng.randrange(26, 56)
+        return out
 
     def _phase(self, frame_index: int) -> float:
         return (frame_index % self.config.frame_count) / self.config.frame_count
@@ -76,10 +85,12 @@ class PixelTrainScene:
     def render_frame(self, frame_index: int) -> Image.Image:
         phase = self._phase(frame_index)
         img = Image.new("RGB", (self.config.width, self.config.height), C["ink"])
-        self._draw_outside(img, phase)
+        self._draw_world(img, phase)
         self._draw_carriage(img, phase)
+        self._draw_bunny(img, phase)
         self._draw_passenger(img, phase)
-        self._draw_glass_reflection(img, phase)
+        self._draw_window_reflections(img, phase)
+        self._draw_foreground_glints(img, phase)
         return img
 
     def render_scaled_frame(self, frame_index: int) -> Image.Image:
@@ -89,208 +100,278 @@ class PixelTrainScene:
             Image.Resampling.NEAREST,
         )
 
-    # ---------- outside world ----------
-    def _draw_outside(self, img: Image.Image, phase: float) -> None:
+    def _draw_world(self, img: Image.Image, phase: float) -> None:
         d = ImageDraw.Draw(img)
-        w = self.config.width
+        night = 0.5 - 0.5 * math.cos(phase * math.tau)
 
-        # A seamless dusk -> night -> dusk lighting cycle.
-        night_amount = 0.5 - 0.5 * math.cos(phase * math.tau)
-        top = _mix(C["sky_top"], C["night"], night_amount * 0.72)
-        mid = _mix(C["sky_mid"], C["night"], night_amount * 0.45)
-        low = _mix(C["sky_low"], C["sky_mid"], night_amount * 0.45)
+        top = _mix(C["sky_top"], C["night"], 0.74 * night)
+        mid = _mix(C["sky_mid"], C["night"], 0.44 * night)
+        low = _mix(C["sky_low"], C["sky_mid"], 0.42 * night)
 
-        horizon = 104
+        horizon = 105
         for y in range(horizon):
             t = y / max(1, horizon - 1)
-            if t < 0.62:
-                col = _mix(top, mid, t / 0.62)
-            else:
-                col = _mix(mid, low, (t - 0.62) / 0.38)
-            d.line((0, y, w, y), fill=col)
+            col = _mix(top, mid, t / 0.58) if t < 0.58 else _mix(mid, low, (t - 0.58) / 0.42)
+            d.line((0, y, self.config.width, y), fill=col)
 
-        # Stars fade in around the middle of the loop.
-        star_strength = max(0.0, (night_amount - 0.22) / 0.78)
+        sun_strength = max(0.0, 1.0 - night * 1.35)
+        if sun_strength > 0.02:
+            sun = _mix(C["sky_low"], C["lamp"], 0.76)
+            sx, sy = 160, 86
+            d.rectangle((sx - 4, sy - 4, sx + 4, sy + 4), fill=sun)
+            d.rectangle((sx - 7, sy - 1, sx + 7, sy + 1), fill=_mix(sun, C["white"], 0.2))
+            d.rectangle((sx - 1, sy - 7, sx + 1, sy + 7), fill=_mix(sun, C["white"], 0.18))
+
+        star_strength = max(0.0, (night - 0.22) / 0.78)
         if star_strength:
-            col = _mix(C["sky_mid"], C["white"], 0.35 + 0.65 * star_strength)
+            col = _mix(C["sky_mid"], C["white"], 0.34 + 0.66 * star_strength)
             for sx, sy, size in self._stars:
                 d.rectangle((sx, sy, sx + size - 1, sy + size - 1), fill=col)
 
-        self._draw_mountains(d, phase, horizon)
-        self._draw_city(d, phase, horizon, night_amount)
-        self._draw_tracks(d, phase)
+        self._draw_clouds(d, phase, mid)
+        self._mountain_strip(d, phase, baseline=106, color=C["mountain_far"], world=512, cycles=1, amp=27, step=34)
+        self._mountain_strip(d, phase, baseline=117, color=C["mountain_near"], world=576, cycles=2, amp=33, step=30)
+        self._draw_city_layer(d, phase, self._city_far, world=840, cycles=3, ground=125, night=night, near=False)
+        self._draw_city_layer(d, phase, self._city_near, world=720, cycles=4, ground=132, night=night, near=True)
+        self._draw_track_bed(d, phase)
+        self._draw_fast_foreground(d, phase)
 
-    def _draw_mountains(self, d: ImageDraw.ImageDraw, phase: float, horizon: int) -> None:
-        self._mountain_strip(d, phase, horizon + 2, C["mountain_far"], world=384, cycles=1, amp=24, step=32)
-        self._mountain_strip(d, phase, horizon + 10, C["mountain_near"], world=448, cycles=2, amp=29, step=28)
+    def _draw_clouds(self, d: ImageDraw.ImageDraw, phase: float, sky_mid):
+        world = 430
+        offset = int((phase * world) % world)
+        clouds = ((22, 36, 42), (96, 51, 30), (172, 31, 38), (260, 58, 26), (344, 42, 48))
+        for cx, cy, cw in clouds:
+            sx = (cx - offset) % world - 55
+            col = _mix(sky_mid, C["white"], 0.11)
+            d.rectangle((sx, cy, sx + cw, cy + 2), fill=col)
+            if cw > 32:
+                d.rectangle((sx + 8, cy - 2, sx + cw - 9, cy), fill=col)
 
     def _mountain_strip(self, d, phase, baseline, color, world, cycles, amp, step):
         offset = int((phase * world * cycles) % world)
         points = [(0, self.config.height)]
-        for i in range(-3, self.config.width // step + 6):
+        for i in range(-4, self.config.width // step + 8):
             world_x = i * step - offset
-            peak = amp - ((i * 11 + cycles * 7) % 13)
-            points.extend(((world_x, baseline), (world_x + step // 2, baseline - peak), (world_x + step, baseline)))
+            peak = amp - ((i * 13 + cycles * 7) % 14)
+            shoulder = max(4, peak // 3)
+            points.extend(
+                (
+                    (world_x, baseline),
+                    (world_x + step // 4, baseline - shoulder),
+                    (world_x + step // 2, baseline - peak),
+                    (world_x + (3 * step) // 4, baseline - shoulder - 2),
+                    (world_x + step, baseline),
+                )
+            )
         points.append((self.config.width, self.config.height))
         d.polygon(points, fill=color)
 
-    def _draw_city(self, d: ImageDraw.ImageDraw, phase: float, horizon: int, night_amount: float) -> None:
-        world = 620
-        offset = int((phase * world * 3) % world)
-        ground = horizon + 21
-        for x, bw, bh, roof in self._city:
-            sx = (x - offset) % world - 22
+    def _draw_city_layer(self, d, phase, buildings, world, cycles, ground, night, near):
+        offset = int((phase * world * cycles) % world)
+        for x, bw, bh, roof, light_phase in buildings:
+            sx = (x - offset) % world - 28
             if sx > self.config.width or sx + bw < 0:
                 continue
-            col = C["city_far"] if (x // 17) % 2 == 0 else C["city_near"]
-            d.rectangle((sx, ground - bh, sx + bw, ground), fill=col)
+            base = C["city_near"] if near else C["city_far"]
+            if near and (x // 23) % 2:
+                base = _mix(base, C["ink2"], 0.12)
+            d.rectangle((sx, ground - bh, sx + bw, ground), fill=base)
             if roof == "antenna":
-                d.line((sx + bw // 2, ground - bh - 5, sx + bw // 2, ground - bh), fill=col)
-            elif roof == "step" and bw >= 10:
-                d.rectangle((sx + 2, ground - bh - 3, sx + bw - 3, ground - bh), fill=col)
-
+                d.line((sx + bw // 2, ground - bh - 7, sx + bw // 2, ground - bh), fill=base)
+                d.point((sx + bw // 2, ground - bh - 8), fill=C["red"])
+            elif roof == "step" and bw >= 12:
+                d.rectangle((sx + 3, ground - bh - 4, sx + bw - 4, ground - bh), fill=base)
             if bh >= 18:
-                glow = _mix(C["sky_low"], C["window_glow"], 0.6 + night_amount * 0.4)
+                glow = _mix(C["sky_low"], C["window_glow"], 0.55 + 0.45 * night)
                 for wy in range(ground - bh + 5, ground - 4, 7):
                     for wx in range(sx + 3, sx + bw - 2, 6):
-                        if ((wx + wy + x) // 4) % 5 == 0:
-                            d.point((wx, wy), fill=glow)
+                        if ((wx + wy + light_phase) // 3) % 5 == 0:
+                            d.rectangle((wx, wy, wx + (1 if near else 0), wy + 1), fill=glow)
 
-    def _draw_tracks(self, d: ImageDraw.ImageDraw, phase: float) -> None:
-        d.rectangle((0, 126, self.config.width, self.config.height), fill=C["ink2"])
-        d.line((0, 135, self.config.width, 135), fill=C["metal"], width=2)
-        d.line((0, 150, self.config.width, 150), fill=C["wall_dark"], width=2)
-
-        sleeper_spacing = 22
-        shift = int((phase * sleeper_spacing * 9) % sleeper_spacing)
-        for x in range(-sleeper_spacing, self.config.width + sleeper_spacing, sleeper_spacing):
+    def _draw_track_bed(self, d, phase):
+        d.rectangle((0, 132, self.config.width, self.config.height), fill=C["ink2"])
+        d.line((0, 139, self.config.width, 139), fill=C["metal"], width=2)
+        d.line((0, 156, self.config.width, 156), fill=C["wall_dark"], width=2)
+        spacing = 22
+        shift = int((phase * spacing * 10) % spacing)
+        for x in range(-spacing, self.config.width + spacing, spacing):
             sx = x - shift
-            d.rectangle((sx, 139, sx + 8, 142), fill=C["wall_dark"])
+            d.polygon([(sx, 145), (sx + 10, 145), (sx + 8, 149), (sx - 2, 149)], fill=C["wall_dark"])
 
-        world = 620
-        offset = int((phase * world * 6) % world)
+    def _draw_fast_foreground(self, d, phase):
+        world = 760
+        offset = int((phase * world * 7) % world)
         for x, kind in self._foreground:
-            sx = (x - offset) % world - 18
-            if not (-18 <= sx <= self.config.width + 18):
+            sx = (x - offset) % world - 26
+            if not (-30 <= sx <= self.config.width + 30):
                 continue
             if kind == "pole":
-                d.rectangle((sx, 18, sx + 2, 132), fill=C["metal"])
-                d.rectangle((sx - 8, 33, sx + 10, 35), fill=C["metal"])
+                d.rectangle((sx, 16, sx + 2, 135), fill=C["metal"])
+                d.rectangle((sx - 9, 29, sx + 12, 31), fill=C["metal"])
+                d.point((sx + 1, 17), fill=C["reflection"])
             elif kind == "lamp":
-                d.rectangle((sx, 69, sx + 2, 132), fill=C["wall_dark"])
-                d.rectangle((sx - 3, 64, sx + 5, 69), fill=C["lamp"])
+                d.rectangle((sx, 70, sx + 2, 135), fill=C["wall_dark"])
+                d.rectangle((sx - 4, 63, sx + 6, 70), fill=C["lamp"])
+                d.rectangle((sx - 7, 65, sx + 9, 67), fill=_mix(C["lamp"], C["white"], 0.25))
+            elif kind == "signal":
+                d.rectangle((sx, 83, sx + 3, 135), fill=C["wall_dark"])
+                d.rectangle((sx - 3, 73, sx + 6, 84), fill=C["ink"])
+                d.rectangle((sx - 1, 75, sx + 3, 79), fill=C["red"])
             else:
-                d.rectangle((sx, 86, sx + 3, 132), fill=C["wall_dark"])
-                d.rectangle((sx - 2, 79, sx + 5, 86), fill=C["red"])
+                d.rectangle((sx, 28, sx + 2, 135), fill=C["metal"])
+                d.rectangle((sx - 16, 42, sx + 18, 44), fill=C["metal"])
+                d.rectangle((sx - 13, 45, sx - 11, 54), fill=C["metal"])
+                d.rectangle((sx + 13, 45, sx + 15, 54), fill=C["metal"])
 
-    # ---------- carriage ----------
     def _draw_carriage(self, img: Image.Image, phase: float) -> None:
         d = ImageDraw.Draw(img)
         w, h = self.config.width, self.config.height
-
-        d.rectangle((0, 0, w, 23), fill=C["wall_dark"])
-        d.rectangle((0, 103, w, h), fill=C["wall"])
-        d.rectangle((0, 22, 17, 103), fill=C["wall"])
-        d.rectangle((81, 22, 93, 103), fill=C["wall"])
-        d.rectangle((232, 22, 245, 103), fill=C["wall"])
-        d.rectangle((309, 22, w, 103), fill=C["wall"])
-
-        for x1, y1, x2, y2 in self.WINDOWS:
-            d.rectangle((x1 - 3, y1 - 3, x2 + 3, y2 + 3), outline=C["trim"], width=3)
-            d.line((x1 - 3, y2 + 3, x2 + 3, y2 + 3), fill=C["ink2"], width=2)
-
+        d.rectangle((0, 0, w, 25), fill=C["wall_dark"])
+        d.rectangle((0, 105, w, h), fill=C["wall"])
+        d.rectangle((0, 21, w, 24), fill=C["trim"])
         d.rectangle((0, 6, w, 10), fill=C["metal"])
-        d.rectangle((0, 19, w, 23), fill=C["trim"])
+        d.rectangle((0, 25, 7, 105), fill=C["wall"])
+        d.rectangle((60, 25, 68, 105), fill=C["wall"])
+        d.rectangle((252, 25, 260, 105), fill=C["wall"])
+        d.rectangle((313, 25, w, 105), fill=C["wall"])
 
-        for hx in (72, 104, 136, 168, 200, 232):
-            d.line((hx, 9, hx, 16), fill=C["trim"], width=1)
-            d.rectangle((hx - 4, 16, hx + 4, 20), outline=C["trim"])
+        for x1, y1, x2, y2 in self.ALL_WINDOWS:
+            d.rectangle((x1 - 3, y1 - 3, x2 + 3, y2 + 3), outline=C["trim"], width=3)
+            d.line((x1 - 1, y2 + 2, x2 + 1, y2 + 2), fill=C["ink2"], width=2)
 
-        d.rectangle((56, 107, 263, 122), fill=C["seat_hi"])
-        d.rectangle((56, 123, 263, 145), fill=C["seat"])
-        d.rectangle((56, 145, 263, 149), fill=C["ink"])
-        d.rectangle((0, 150, w, h), fill=C["ink"])
-        d.rectangle((0, 151, w, 154), fill=C["metal"])
+        d.rectangle((65, 14, 255, 24), fill=C["wall_dark"])
+        d.rectangle((66, 15, 254, 17), fill=C["metal"])
+        d.rectangle((78, 18, 242, 20), fill=C["wall"])
 
-        for sx in (97, 139, 181, 223):
-            d.line((sx, 108, sx, 144), fill=C["ink2"])
+        for hx in (88, 120, 152, 184, 216):
+            d.line((hx, 9, hx, 15), fill=C["trim"])
+            d.line((hx - 5, 16, hx - 3, 22), fill=C["trim"])
+            d.line((hx + 5, 16, hx + 3, 22), fill=C["trim"])
+            d.line((hx - 3, 22, hx + 3, 22), fill=C["trim"])
+            d.line((hx - 5, 16, hx + 5, 16), fill=C["trim"])
 
-        for x in (7, 314):
-            d.rectangle((x, 36, x + 2, 134), fill=C["trim"])
-        d.rectangle((109, 96, 115, 107), fill=C["red"])
-        d.point((112, 99), fill=C["white"])
+        for x in (31, 289):
+            d.line((x, 26, x, 106), fill=C["ink2"])
+            d.rectangle((x - 1, 57, x + 1, 73), fill=C["metal"])
 
-        blink = 1 if math.sin(phase * math.tau * 16) > 0.82 else 0
-        if blink:
-            d.point((286, 17), fill=C["lamp"])
-            d.point((288, 17), fill=C["lamp"])
+        d.rectangle((48, 108, 272, 120), fill=C["seat_hi"])
+        d.rectangle((48, 121, 272, 148), fill=C["seat"])
+        d.line((48, 121, 272, 121), fill=C["trim"])
+        d.line((48, 148, 272, 148), fill=C["ink"])
+        for sx in (92, 136, 180, 224):
+            d.line((sx, 109, sx, 147), fill=C["ink2"])
+        d.rectangle((42, 149, 278, 154), fill=C["ink"])
+        d.rectangle((0, 155, w, h), fill=C["ink"])
+        d.rectangle((0, 156, w, 159), fill=C["metal"])
+        d.rectangle((0, 160, w, 163), fill=C["wall_dark"])
 
-    # ---------- passenger sprite ----------
+        d.rectangle((110, 96, 116, 107), fill=C["red"])
+        d.rectangle((112, 97, 115, 99), fill=_mix(C["red"], C["white"], 0.35))
+        d.point((114, 103), fill=C["white"])
+
+        indicator = int((phase * 18) % 18)
+        for i, ix in enumerate((281, 286, 291)):
+            col = C["lamp"] if indicator == i else C["wall"]
+            d.rectangle((ix, 16, ix + 1, 17), fill=col)
+
+    def _draw_bunny(self, img: Image.Image, phase: float) -> None:
+        d = ImageDraw.Draw(img)
+        x, y = 148, 111
+        bob = 1 if math.sin(phase * math.tau * 4 + 0.8) > 0.68 else 0
+        d.rectangle((x + 2, y - 15 - bob, x + 5, y - 4 - bob), fill=C["white"])
+        d.rectangle((x + 10, y - 15 - bob, x + 13, y - 4 - bob), fill=C["white"])
+        d.rectangle((x + 3, y - 13 - bob, x + 4, y - 7 - bob), fill=C["scarf"])
+        d.rectangle((x + 11, y - 13 - bob, x + 12, y - 7 - bob), fill=C["scarf"])
+        d.rectangle((x, y - 5 - bob, x + 15, y + 9 - bob), fill=C["white"])
+        d.rectangle((x + 2, y + 10 - bob, x + 13, y + 22 - bob), fill=C["coat_dark"])
+        d.rectangle((x + 5, y + 11 - bob, x + 10, y + 17 - bob), fill=C["red"])
+        d.rectangle((x + 3, y + 23 - bob, x + 6, y + 26 - bob), fill=C["scarf"])
+        d.rectangle((x + 10, y + 23 - bob, x + 13, y + 26 - bob), fill=C["scarf"])
+        d.point((x + 4, y + 1 - bob), fill=C["ink"])
+        d.point((x + 11, y + 1 - bob), fill=C["ink"])
+        d.point((x + 8, y + 5 - bob), fill=C["scarf"])
+
     def _draw_passenger(self, img: Image.Image, phase: float) -> None:
         d = ImageDraw.Draw(img)
-        seat_y = 122
-
+        cx = 211
         breath = 1 if math.sin(phase * math.tau * 4) > 0.65 else 0
-        hair_sway = 1 if math.sin(phase * math.tau * 3 + 0.7) > 0.45 else 0
-
+        sway = 1 if math.sin(phase * math.tau * 3 + 0.6) > 0.38 else 0
         f = phase * self.config.frame_count
-        blink = any(abs(f - b) < 1.3 for b in (22, 23, 73, 113, 114))
+        blink = any(abs(f - b) < 1.2 for b in (18, 19, 62, 101, 102, 136))
 
-        d.rectangle((188, seat_y + 8, 192, seat_y + 29), fill=C["skin"])
-        d.rectangle((199, seat_y + 8, 203, seat_y + 29), fill=C["skin"])
-        d.rectangle((185, seat_y + 29, 193, seat_y + 33), fill=C["shoe"])
-        d.rectangle((198, seat_y + 29, 206, seat_y + 33), fill=C["shoe"])
+        d.rectangle((cx - 8, 130, cx - 4, 147), fill=C["skin"])
+        d.rectangle((cx + 5, 130, cx + 9, 147), fill=C["skin"])
+        d.rectangle((cx - 11, 147, cx - 3, 151), fill=C["shoe"])
+        d.rectangle((cx + 4, 147, cx + 12, 151), fill=C["shoe"])
+        d.rectangle((cx - 10, 146, cx - 6, 147), fill=C["coat_dark"])
+        d.rectangle((cx + 6, 146, cx + 10, 147), fill=C["coat_dark"])
 
-        body_top = 97 - breath
-        d.rectangle((181, body_top, 210, seat_y + 11), fill=C["coat_dark"])
-        d.rectangle((185, body_top + 3, 206, seat_y + 8), fill=C["coat"])
-        d.rectangle((189, body_top + 5, 202, body_top + 8), fill=C["scarf"])
-        d.rectangle((180, body_top + 8, 184, body_top + 26), fill=C["coat"])
-        d.rectangle((207, body_top + 8, 211, body_top + 26), fill=C["coat"])
-        d.point((181, body_top + 27), fill=C["skin"])
-        d.point((210, body_top + 27), fill=C["skin"])
+        body_top = 105 - breath
+        d.polygon([(cx - 15, body_top + 16), (cx + 15, body_top + 16), (cx + 19, 132), (cx - 19, 132)], fill=C["coat"])
+        d.polygon([(cx - 15, body_top + 18), (cx - 6, 132), (cx - 2, 132), (cx - 8, body_top + 18)], fill=C["coat_dark"])
+        d.line((cx - 18, 131, cx + 18, 131), fill=C["trim"])
+        d.rectangle((cx - 13, body_top, cx + 13, body_top + 21), fill=C["coat_dark"])
+        d.rectangle((cx - 8, body_top + 2, cx + 8, body_top + 19), fill=C["coat"])
+        d.rectangle((cx - 3, body_top + 3, cx + 3, body_top + 18), fill=C["trim"])
+        d.rectangle((cx - 7, body_top + 1, cx + 7, body_top + 4), fill=C["white"])
+        d.rectangle((cx - 6, body_top + 5, cx + 6, body_top + 7), fill=C["scarf"])
+        d.point((cx, body_top + 8), fill=C["lamp"])
+        d.point((cx, body_top + 13), fill=C["lamp"])
 
-        d.rectangle((191, 83 - breath, 199, 90 - breath), fill=C["skin"])
-        d.rectangle((186, 70 - breath, 204, 86 - breath), fill=C["skin"])
+        d.polygon([(cx - 14, body_top + 3), (cx - 20, body_top + 11), (cx - 17, body_top + 25), (cx - 13, body_top + 23)], fill=C["coat"])
+        d.polygon([(cx + 14, body_top + 3), (cx + 20, body_top + 11), (cx + 17, body_top + 25), (cx + 13, body_top + 23)], fill=C["coat"])
+        d.rectangle((cx - 18, body_top + 24, cx - 15, body_top + 27), fill=C["skin"])
+        d.rectangle((cx + 15, body_top + 24, cx + 18, body_top + 27), fill=C["skin"])
 
-        hy = 66 - breath
-        d.rectangle((183, hy, 207 + hair_sway, hy + 15), fill=C["hair_dark"])
-        d.rectangle((181, hy + 6, 186, hy + 25), fill=C["hair_dark"])
-        d.rectangle((204 + hair_sway, hy + 4, 211 + hair_sway, hy + 26), fill=C["hair_dark"])
-        d.rectangle((185, hy - 3, 204, hy + 7), fill=C["hair"])
-        d.rectangle((184, hy + 2, 189, hy + 13), fill=C["hair"])
-        d.rectangle((199, hy + 1, 207, hy + 12), fill=C["hair"])
-        d.rectangle((188, hy + 6, 191, hy + 9), fill=C["hair"])
-        d.rectangle((196, hy + 5, 199, hy + 8), fill=C["hair"])
+        d.rectangle((cx - 4, 92 - breath, cx + 4, 99 - breath), fill=C["skin"])
+        face_top = 80 - breath
+        d.rectangle((cx - 10, face_top, cx + 10, face_top + 17), fill=C["skin"])
+        d.rectangle((cx - 9, face_top + 14, cx + 9, face_top + 18), fill=C["skin"])
 
-        eye_y = 78 - breath
+        hair_top = 72 - breath
+        d.rectangle((cx - 15, hair_top + 3, cx + 15 + sway, hair_top + 16), fill=C["hair_dark"])
+        d.rectangle((cx - 18, hair_top + 10, cx - 12, hair_top + 31), fill=C["hair_dark"])
+        d.rectangle((cx + 12 + sway, hair_top + 9, cx + 19 + sway, hair_top + 32), fill=C["hair_dark"])
+        d.rectangle((cx - 13, hair_top, cx + 12, hair_top + 9), fill=C["hair"])
+        d.rectangle((cx - 16, hair_top + 5, cx - 10, hair_top + 16), fill=C["hair"])
+        d.rectangle((cx + 8, hair_top + 4, cx + 16 + sway, hair_top + 15), fill=C["hair"])
+        d.rectangle((cx - 9, hair_top + 6, cx - 6, hair_top + 13), fill=C["hair"])
+        d.rectangle((cx - 2, hair_top + 5, cx + 2, hair_top + 11), fill=C["hair"])
+        d.rectangle((cx + 5, hair_top + 6, cx + 8, hair_top + 13), fill=C["hair"])
+
+        eye_y = face_top + 8
         if blink:
-            d.line((189, eye_y, 192, eye_y), fill=C["ink"])
-            d.line((198, eye_y, 201, eye_y), fill=C["ink"])
+            d.line((cx - 6, eye_y, cx - 3, eye_y), fill=C["ink"])
+            d.line((cx + 3, eye_y, cx + 6, eye_y), fill=C["ink"])
         else:
-            d.rectangle((189, eye_y - 1, 191, eye_y + 1), fill=C["ink"])
-            d.rectangle((199, eye_y - 1, 201, eye_y + 1), fill=C["ink"])
-            d.point((190, eye_y - 1), fill=C["white"])
-            d.point((200, eye_y - 1), fill=C["white"])
+            d.rectangle((cx - 6, eye_y - 1, cx - 4, eye_y + 1), fill=C["ink"])
+            d.rectangle((cx + 4, eye_y - 1, cx + 6, eye_y + 1), fill=C["ink"])
+            d.point((cx - 5, eye_y - 1), fill=C["white"])
+            d.point((cx + 5, eye_y - 1), fill=C["white"])
+        d.point((cx, face_top + 12), fill=C["scarf"])
+        d.line((cx - 9, hair_top + 2, cx + 3, hair_top + 2), fill=_mix(C["hair"], C["white"], 0.14))
 
-        d.rectangle((216, 113, 229, 125), fill=C["hair_dark"])
-        d.rectangle((219, 111, 226, 113), fill=C["trim"])
-        d.point((222, 117), fill=C["lamp"])
-
-    def _draw_glass_reflection(self, img: Image.Image, phase: float) -> None:
-        d = ImageDraw.Draw(img)
-        for i, (x1, y1, x2, y2) in enumerate(self.WINDOWS):
-            span = x2 - x1 + 26
-            sweep = x1 - 13 + int((phase * span * 2 + i * 19) % span)
-            for dx, alpha in ((0, 0.12), (2, 0.08), (5, 0.05)):
-                x = sweep + dx
+    def _draw_window_reflections(self, img: Image.Image, phase: float) -> None:
+        for i, (x1, y1, x2, y2) in enumerate(self.ALL_WINDOWS):
+            span = x2 - x1 + 40
+            sweep = x1 - 20 + int((phase * span * 2 + i * 23) % span)
+            for y in range(y1 + 4, y2 - 4):
+                diag = (y - y1) // 8
+                x = sweep + diag
                 if x1 <= x <= x2:
-                    for y in range(y1 + 4, y2 - 3):
-                        old = img.getpixel((x, y))
-                        img.putpixel((x, y), _mix(old, C["reflection"], alpha))
+                    for dx, amount in ((0, 0.11), (1, 0.08), (3, 0.04)):
+                        xx = x + dx
+                        if x1 <= xx <= x2:
+                            old = img.getpixel((xx, y))
+                            img.putpixel((xx, y), _mix(old, C["reflection"], amount))
 
-            if ((phase * 8 + i * 0.3) % 1.0) < 0.04:
-                gx = (x1 + x2) // 2 + (i - 1) * 7
-                gy = y1 + 18 + i * 5
-                d.line((gx - 3, gy, gx + 3, gy), fill=C["lamp"])
-                d.line((gx, gy - 3, gx, gy + 3), fill=C["lamp"])
+    def _draw_foreground_glints(self, img: Image.Image, phase: float) -> None:
+        d = ImageDraw.Draw(img)
+        pulse = (phase * 6.0) % 1.0
+        if pulse < 0.18:
+            strength = 1.0 - pulse / 0.18
+            gx, gy = 162, 88
+            arm = 2 + round(strength * 4)
+            col = _mix(C["lamp"], C["white"], 0.35)
+            d.line((gx - arm, gy, gx + arm, gy), fill=col)
+            d.line((gx, gy - arm, gx, gy + arm), fill=col)
