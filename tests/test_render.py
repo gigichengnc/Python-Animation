@@ -1,19 +1,18 @@
 from pixel_train.scene import PixelTrainScene, RenderConfig
 
 
-def test_native_frame_size_and_mode():
-    cfg = RenderConfig(width=320, height=180, duration=2, fps=6, scale=2)
-    scene = PixelTrainScene(cfg)
-    frame = scene.render_frame(0)
-    assert frame.size == (320, 180)
+def test_default_native_resolution():
+    cfg = RenderConfig()
+    assert (cfg.width, cfg.height) == (480, 270)
+    frame = PixelTrainScene(cfg).render_frame(0)
+    assert frame.size == (480, 270)
     assert frame.mode == "RGB"
 
 
-def test_scaled_frame_uses_integer_pixel_scale():
-    cfg = RenderConfig(width=320, height=180, duration=2, fps=6, scale=3)
-    scene = PixelTrainScene(cfg)
-    frame = scene.render_scaled_frame(0)
-    assert frame.size == (960, 540)
+def test_four_x_export_is_full_hd():
+    cfg = RenderConfig(duration=1, fps=2, scale=4)
+    frame = PixelTrainScene(cfg).render_scaled_frame(0)
+    assert frame.size == (1920, 1080)
 
 
 def test_render_is_deterministic():
@@ -26,9 +25,7 @@ def test_render_is_deterministic():
 def test_loop_phase_wraps_exactly():
     cfg = RenderConfig(duration=2, fps=6)
     scene = PixelTrainScene(cfg)
-    first = scene.render_frame(0)
-    wrapped = scene.render_frame(cfg.frame_count)
-    assert first.tobytes() == wrapped.tobytes()
+    assert scene.render_frame(0).tobytes() == scene.render_frame(cfg.frame_count).tobytes()
 
 
 def test_world_moves_but_carriage_anchor_stays_stable():
@@ -38,6 +35,5 @@ def test_world_moves_but_carriage_anchor_stays_stable():
     b = scene.render_frame(31)
 
     assert a.tobytes() != b.tobytes()
-    # Ceiling / structural pixels are anchored to the camera.
     assert a.getpixel((2, 2)) == b.getpixel((2, 2))
-    assert a.getpixel((64, 110)) == b.getpixel((64, 110))
+    assert a.getpixel((80, 190)) == b.getpixel((80, 190))
