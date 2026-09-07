@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixel-train"
-version = "0.1.0"
+version = "0.4.0"
 description = "A deterministic Python pixel-animation engine for a cinematic train journey."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 pixel-train = "pixel_train.render:main"
+pixel-train-v04 = "pixel_train.render_v04:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
